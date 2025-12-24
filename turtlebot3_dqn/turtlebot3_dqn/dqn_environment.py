@@ -146,6 +146,10 @@ class RLEnvironment(Node):
         self.prev_goal_distance = self.init_goal_distance
         response.state = state
 
+        self.done = False
+        self.fail = False
+        self.succeed = False
+
         return response
 
     def call_task_succeed(self):
@@ -318,17 +322,41 @@ class RLEnvironment(Node):
         return reward
 
     def rl_agent_interface_callback(self, request, response):
-        action = request.action
+        action_list = request.action
+        
+        # TurtleBot3 Waffle Pi Fiziksel Limitleri
+        MAX_LIN_VEL = 0.26
+        MAX_ANG_VEL = 1.82
+
+        # action_list[0] -> Sigmoid (Gaz)
+        # action_list[1] -> Tanh (Direksiyon)
+        
+        # --- MİNİMUM HIZ AYARI ---
+        # Robotun durmasına izin verme. En az %20 gazla gitsin.
+        MIN_LIN_VEL = 0.05 
+        
+        # Gelen 0.0-1.0 arasındaki değeri, 0.05 ile MAX arasında ölçekle
+        # Yani yapay zeka "0" dese bile robot 0.05 ile gidecek.
+        raw_linear = float(action_list[0])
+        linear_cmd = raw_linear * (MAX_LIN_VEL - MIN_LIN_VEL) + MIN_LIN_VEL
+        
+        angular_cmd = float(action_list[1]) * MAX_ANG_VEL
+        # -------------------------
+
+        # ROS Mesajını Hazırla
         if ROS_DISTRO == 'humble':
             msg = Twist()
-            msg.linear.x = 0.2
-            msg.angular.z = self.angular_vel[action]
+            msg.linear.x = linear_cmd
+            msg.angular.z = angular_cmd
         else:
             msg = TwistStamped()
-            msg.twist.linear.x = 0.2
-            msg.twist.angular.z = self.angular_vel[action]
+            msg.twist.linear.x = linear_cmd
+            msg.twist.angular.z = angular_cmd
 
+        # Robotu Hareket Ettir
         self.cmd_vel_pub.publish(msg)
+
+        # Zamanlayıcıyı ayarla (Robotun takılmaması için)
         if self.stop_cmd_vel_timer is None:
             self.prev_goal_distance = self.init_goal_distance
             self.stop_cmd_vel_timer = self.create_timer(0.8, self.timer_callback)
@@ -336,6 +364,7 @@ class RLEnvironment(Node):
             self.destroy_timer(self.stop_cmd_vel_timer)
             self.stop_cmd_vel_timer = self.create_timer(0.8, self.timer_callback)
 
+        # Durumu ve ödülü hesapla
         response.state = self.calculate_state()
         response.reward = self.calculate_reward()
         response.done = self.done

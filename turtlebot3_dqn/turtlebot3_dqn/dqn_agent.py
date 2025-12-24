@@ -73,8 +73,8 @@ class DQNAgent(Node):
         super().__init__('dqn_agent')
 
         self.stage = int(stage_num)
-        self.train_mode = True
-        self.state_size = 26
+        self.train_mode = False
+        self.state_size = 14
         self.action_size = 5
         self.max_training_episodes = int(max_training_episodes)
 
@@ -99,8 +99,8 @@ class DQNAgent(Node):
         self.update_target_after = 5000
         self.target_update_after_counter = 0
 
-        self.load_model = False
-        self.load_episode = 0
+        self.load_model = True
+        self.load_episode = 800
         self.model_dir_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
             'saved_model'
