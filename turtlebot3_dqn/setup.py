@@ -35,6 +35,7 @@ setup(
             'action_graph = turtlebot3_dqn.action_graph:main',
             'dqn_agent = turtlebot3_dqn.dqn_agent:main',
             'ddpg_agent = turtlebot3_dqn.ddpg_agent:main',
+            'ddpg_agent_w3f = turtlebot3_dqn.ddpg_agentW3f:main',
             'dqn_environment = turtlebot3_dqn.dqn_environment:main',
             'dqn_gazebo = turtlebot3_dqn.dqn_gazebo:main',
             'dqn_test = turtlebot3_dqn.dqn_test:main',

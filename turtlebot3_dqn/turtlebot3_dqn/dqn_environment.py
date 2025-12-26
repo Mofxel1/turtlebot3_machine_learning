@@ -187,12 +187,17 @@ class RLEnvironment(Node):
         angle_min = scan.angle_min
         angle_increment = scan.angle_increment
 
-        self.front_distance = scan.ranges[0]
+        # Ön mesafe (0. indeks genelde tam ön kabul edilir)
+        if num_of_lidar_rays > 0:
+            self.front_distance = scan.ranges[0]
+        else:
+            self.front_distance = 0.0
 
         for i in range(num_of_lidar_rays):
             angle = angle_min + i * angle_increment
             distance = scan.ranges[i]
 
+            # Sonsuz veya bozuk verileri temizle
             if distance == float('Inf'):
                 distance = 3.5
             elif numpy.isnan(distance):
@@ -200,13 +205,15 @@ class RLEnvironment(Node):
 
             self.scan_ranges.append(distance)
 
-            if (0 <= angle <= math.pi/2) or (3*math.pi/2 <= angle <= 2*math.pi):
-                self.front_ranges.append(distance)
-                self.front_angles.append(angle)
+            # --- DEĞİŞİKLİK BURADA ---
+            # Eskiden burada açı filtresi (if angle < ...) vardı.
+            # Artık tüm (24 adet) veriyi, robotun arkası dahil her şeyi
+            # öğrenme verisine (front_ranges) ekliyoruz.
+            self.front_ranges.append(distance)
+            self.front_angles.append(angle)
 
         self.min_obstacle_distance = min(self.scan_ranges)
         self.front_min_obstacle_distance = min(self.front_ranges) if self.front_ranges else 10.0
-
     def odom_sub_callback(self, msg):
         self.robot_pose_x = msg.pose.pose.position.x
         self.robot_pose_y = msg.pose.pose.position.y
@@ -274,9 +281,32 @@ class RLEnvironment(Node):
 
     def compute_directional_weights(self, relative_angles, max_weight=10.0):
         power = 6
-        raw_weights = (numpy.cos(relative_angles))**power + 0.1
+        
+        # Kosinüs değerleri: Ön taraf (+), Arka taraf (-)
+        cos_values = numpy.cos(relative_angles)
+        
+        # --- KRİTİK DEĞİŞİKLİK ---
+        # Sadece pozitif (ön) açıları al, negatifleri (arka) SIFIRLA.
+        # Robotun arkasında duvar olması, ileri giderken ceza sebebi olmamalı.
+        positive_cos = numpy.maximum(0, cos_values)
+        
+        # Sadece ön tarafın 6. kuvvetini al
+        raw_weights = (positive_cos)**power 
+        
+        # +0.1 eklemesini kaldırdık veya çok küçülttük ki gürültü yapmasın
+        raw_weights = numpy.where(raw_weights > 0.001, raw_weights, 0.0)
+
+        # Eğer hepsi sıfırsa (tamamen arkası doluysa) ağırlık verme
+        if numpy.max(raw_weights) == 0:
+             return numpy.zeros_like(raw_weights)
+
         scaled_weights = raw_weights * (max_weight / numpy.max(raw_weights))
-        normalized_weights = scaled_weights / numpy.sum(scaled_weights)
+        
+        sum_weights = numpy.sum(scaled_weights)
+        if sum_weights == 0:
+            return scaled_weights
+            
+        normalized_weights = scaled_weights / sum_weights
         return normalized_weights
 
     def compute_weighted_obstacle_reward(self):
