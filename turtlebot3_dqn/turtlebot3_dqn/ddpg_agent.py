@@ -33,7 +33,7 @@ class DDPGAgent(Node):
         super().__init__('ddpg_agent')
 
         self.stage = int(stage_num)
-        self.train_mode = False  # EĞİTİM MODU AÇIK!
+        self.train_mode = True  # EĞİTİM MODU AÇIK!
         
         self.state_size = 14
         self.action_size = 2 # [Linear Velocity, Angular Velocity]
@@ -75,7 +75,7 @@ class DDPGAgent(Node):
         self.critic_optimizer = Adam(learning_rate=self.critic_lr)
 
         # Model Yükleme/Kaydetme Yolları
-        self.load_model_flag = True 
+        self.load_model_flag = False 
         self.load_episode = 0
         self.model_dir_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
