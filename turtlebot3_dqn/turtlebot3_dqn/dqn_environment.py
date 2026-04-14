@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
 #################################################################################
 # Copyright 2019 ROBOTIS CO., LTD.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Orhan tarafindan SAC Algoritmasina ozel olarak modifiye edilmistir.
 #################################################################################
-#
-# Authors: Ryan Shim, Gilbert, ChanHyeong Lee
 
 import math
 import os
@@ -64,6 +51,7 @@ class RLEnvironment(Node):
         self.is_front_min_actual_front = False
 
         self.local_step = 0
+        self.last_angular_action = 0.0  
         self.stop_cmd_vel_timer = None
         self.angular_vel = [1.5, 0.75, 0.0, -0.75, -1.5]
 
@@ -149,6 +137,7 @@ class RLEnvironment(Node):
         self.done = False
         self.fail = False
         self.succeed = False
+        self.local_step = 0  # HATA ÇÖZÜLDÜ: Adim sayaci sadece bölüm basinda sifirlanir!
 
         return response
 
@@ -187,7 +176,6 @@ class RLEnvironment(Node):
         angle_min = scan.angle_min
         angle_increment = scan.angle_increment
 
-        # Ön mesafe (0. indeks genelde tam ön kabul edilir)
         if num_of_lidar_rays > 0:
             self.front_distance = scan.ranges[0]
         else:
@@ -197,23 +185,18 @@ class RLEnvironment(Node):
             angle = angle_min + i * angle_increment
             distance = scan.ranges[i]
 
-            # Sonsuz veya bozuk verileri temizle
             if distance == float('Inf'):
                 distance = 3.5
             elif numpy.isnan(distance):
                 distance = 0.0
 
             self.scan_ranges.append(distance)
-
-            # --- DEĞİŞİKLİK BURADA ---
-            # Eskiden burada açı filtresi (if angle < ...) vardı.
-            # Artık tüm (24 adet) veriyi, robotun arkası dahil her şeyi
-            # öğrenme verisine (front_ranges) ekliyoruz.
             self.front_ranges.append(distance)
             self.front_angles.append(angle)
 
         self.min_obstacle_distance = min(self.scan_ranges)
         self.front_min_obstacle_distance = min(self.front_ranges) if self.front_ranges else 10.0
+
     def odom_sub_callback(self, msg):
         self.robot_pose_x = msg.pose.pose.position.x
         self.robot_pose_y = msg.pose.pose.position.y
@@ -229,7 +212,6 @@ class RLEnvironment(Node):
         goal_angle = path_theta - self.robot_pose_theta
         if goal_angle > math.pi:
             goal_angle -= 2 * math.pi
-
         elif goal_angle < -math.pi:
             goal_angle += 2 * math.pi
 
@@ -242,6 +224,7 @@ class RLEnvironment(Node):
         state.append(float(self.goal_angle))
         for var in self.front_ranges:
             state.append(float(var))
+        
         self.local_step += 1
 
         if self.goal_distance < 0.20:
@@ -252,7 +235,6 @@ class RLEnvironment(Node):
                 self.cmd_vel_pub.publish(Twist())
             else:
                 self.cmd_vel_pub.publish(TwistStamped())
-            self.local_step = 0
             self.call_task_succeed()
 
         if self.min_obstacle_distance < 0.15:
@@ -263,10 +245,9 @@ class RLEnvironment(Node):
                 self.cmd_vel_pub.publish(Twist())
             else:
                 self.cmd_vel_pub.publish(TwistStamped())
-            self.local_step = 0
             self.call_task_failed()
 
-        if self.local_step == self.max_step:
+        if self.local_step >= self.max_step:
             self.get_logger().info('Time out!')
             self.fail = True
             self.done = True
@@ -274,106 +255,66 @@ class RLEnvironment(Node):
                 self.cmd_vel_pub.publish(Twist())
             else:
                 self.cmd_vel_pub.publish(TwistStamped())
-            self.local_step = 0
             self.call_task_failed()
 
         return state
 
-    def compute_directional_weights(self, relative_angles, max_weight=10.0):
-        power = 6
-        
-        # Kosinüs değerleri: Ön taraf (+), Arka taraf (-)
-        cos_values = numpy.cos(relative_angles)
-        
-        # --- KRİTİK DEĞİŞİKLİK ---
-        # Sadece pozitif (ön) açıları al, negatifleri (arka) SIFIRLA.
-        # Robotun arkasında duvar olması, ileri giderken ceza sebebi olmamalı.
-        positive_cos = numpy.maximum(0, cos_values)
-        
-        # Sadece ön tarafın 6. kuvvetini al
-        raw_weights = (positive_cos)**power 
-        
-        # +0.1 eklemesini kaldırdık veya çok küçülttük ki gürültü yapmasın
-        raw_weights = numpy.where(raw_weights > 0.001, raw_weights, 0.0)
-
-        # Eğer hepsi sıfırsa (tamamen arkası doluysa) ağırlık verme
-        if numpy.max(raw_weights) == 0:
-             return numpy.zeros_like(raw_weights)
-
-        scaled_weights = raw_weights * (max_weight / numpy.max(raw_weights))
-        
-        sum_weights = numpy.sum(scaled_weights)
-        if sum_weights == 0:
-            return scaled_weights
-            
-        normalized_weights = scaled_weights / sum_weights
-        return normalized_weights
-
-    def compute_weighted_obstacle_reward(self):
-        if not self.front_ranges or not self.front_angles:
-            return 0.0
-
-        front_ranges = numpy.array(self.front_ranges)
-        front_angles = numpy.array(self.front_angles)
-
-        valid_mask = front_ranges <= 0.5
-        if not numpy.any(valid_mask):
-            return 0.0
-
-        front_ranges = front_ranges[valid_mask]
-        front_angles = front_angles[valid_mask]
-
-        relative_angles = numpy.unwrap(front_angles)
-        relative_angles[relative_angles > numpy.pi] -= 2 * numpy.pi
-
-        weights = self.compute_directional_weights(relative_angles, max_weight=10.0)
-
-        safe_dists = numpy.clip(front_ranges - 0.25, 1e-2, 3.5)
-        decay = numpy.exp(-3.0 * safe_dists)
-
-        weighted_decay = numpy.dot(weights, decay)
-
-        reward = - (1.0 + 4.0 * weighted_decay)
-
-        return reward
-
     def calculate_reward(self):
-        yaw_reward = 1 - (2 * abs(self.goal_angle) / math.pi)
-        obstacle_reward = self.compute_weighted_obstacle_reward()
+        # 1. Yönelme Ödülü 
+        yaw_reward = 1.0 - (2.0 * abs(self.goal_angle) / math.pi)
+        
+        # 2. Mesafe Ödülü 
+        distance_reward = (self.prev_goal_distance - self.goal_distance) * 100.0
+        self.prev_goal_distance = self.goal_distance 
+        
+        # 3. Zaman Cezasi 
+        time_penalty = -2.0
+        
+        # 4. YENİ: Kademeli Engel Cezası (Suni Potansiyel Alanı)
+        obstacle_reward = 0.0
+        safe_dist = 0.50  # 50 cm'den itibaren radar ötmeye / acı hissetmeye başlar
+        
+        if self.min_obstacle_distance < safe_dist:
+            # Risk oranını hesapla (0.0 ile 1.0 arası bir değer)
+            risk = (safe_dist - self.min_obstacle_distance) / safe_dist
+            
+            # Cezanın karesini alıyoruz ki; uzaktayken çok yumuşak, yaklaşınca aniden sertleşsin.
+            obstacle_reward = -3.0 * (risk ** 2)
 
-        print('directional_reward: %f, obstacle_reward: %f' % (yaw_reward, obstacle_reward))
-        reward = yaw_reward + obstacle_reward
+        # Direksiyon Cezasi (steering_penalty) tamamen silindi!
+        
+        step_reward = yaw_reward + distance_reward + obstacle_reward + time_penalty
 
+        print('yaw: %.2f, dist: %.2f, obs: %.2f, time: -2.0' % (yaw_reward, distance_reward, obstacle_reward))
+
+        # --- FİNAL HÜKMÜ ---
         if self.succeed:
-            reward = 100.0
+            reward = 300.0  
         elif self.fail:
-            reward = -50.0
+            if self.local_step >= self.max_step:
+                reward = -150.0 # Zaman asimi cezasi 
+            else:
+                reward = -150.0 # Çarpma cezasi
+        else:
+            reward = step_reward
 
         return reward
 
     def rl_agent_interface_callback(self, request, response):
         action_list = request.action
         
-        # TurtleBot3 Waffle Pi Fiziksel Limitleri
         MAX_LIN_VEL = 0.26
         MAX_ANG_VEL = 1.82
 
-        # action_list[0] -> Sigmoid (Gaz)
-        # action_list[1] -> Tanh (Direksiyon)
+        # --- İLERİ İTİŞ KURALI İPTAL (Robot artık durup dönebilir) ---
+        MIN_LIN_VEL = 0.00 
         
-        # --- MİNİMUM HIZ AYARI ---
-        # Robotun durmasına izin verme. En az %20 gazla gitsin.
-        MIN_LIN_VEL = 0.05 
-        
-        # Gelen 0.0-1.0 arasındaki değeri, 0.05 ile MAX arasında ölçekle
-        # Yani yapay zeka "0" dese bile robot 0.05 ile gidecek.
         raw_linear = float(action_list[0])
         linear_cmd = raw_linear * (MAX_LIN_VEL - MIN_LIN_VEL) + MIN_LIN_VEL
-        
-        angular_cmd = float(action_list[1]) * MAX_ANG_VEL
-        # -------------------------
 
-        # ROS Mesajını Hazırla
+        self.last_angular_action = float(action_list[1])
+        angular_cmd = self.last_angular_action * MAX_ANG_VEL
+
         if ROS_DISTRO == 'humble':
             msg = Twist()
             msg.linear.x = linear_cmd
@@ -383,10 +324,8 @@ class RLEnvironment(Node):
             msg.twist.linear.x = linear_cmd
             msg.twist.angular.z = angular_cmd
 
-        # Robotu Hareket Ettir
         self.cmd_vel_pub.publish(msg)
 
-        # Zamanlayıcıyı ayarla (Robotun takılmaması için)
         if self.stop_cmd_vel_timer is None:
             self.prev_goal_distance = self.init_goal_distance
             self.stop_cmd_vel_timer = self.create_timer(0.8, self.timer_callback)
@@ -394,7 +333,6 @@ class RLEnvironment(Node):
             self.destroy_timer(self.stop_cmd_vel_timer)
             self.stop_cmd_vel_timer = self.create_timer(0.8, self.timer_callback)
 
-        # Durumu ve ödülü hesapla
         response.state = self.calculate_state()
         response.reward = self.calculate_reward()
         response.done = self.done
@@ -407,7 +345,6 @@ class RLEnvironment(Node):
         return response
 
     def timer_callback(self):
-        self.get_logger().info('Stop called')
         if ROS_DISTRO == 'humble':
             self.cmd_vel_pub.publish(Twist())
         else:
@@ -445,7 +382,6 @@ def main(args=None):
     finally:
         rl_environment.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

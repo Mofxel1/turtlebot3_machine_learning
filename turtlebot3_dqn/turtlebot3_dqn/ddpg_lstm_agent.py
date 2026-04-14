@@ -18,7 +18,7 @@ from std_msgs.msg import Float32MultiArray
 from std_srvs.srv import Empty
 
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense, Concatenate, LayerNormalization, LeakyReLU
+from tensorflow.keras.layers import Input, Dense, Concatenate, LayerNormalization, LeakyReLU, LSTM, Reshape
 from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.initializers import RandomUniform
@@ -216,27 +216,22 @@ class DDPGAgent(Node):
     def create_actor_model(self):
         state_input = Input(shape=(self.state_size,))
         
-        # Katman 1 + Normalizasyon + LeakyReLU
-        h1 = Dense(512)(state_input)
+        # 1. 78 boyutlu düz veriyi, (3 zaman adımı, 26 Lidar verisi) formatına çeviriyoruz
+        reshaped_state = Reshape((self.stack_size, self.raw_state_size))(state_input)
+        
+        # 2. LSTM Katmanı: Zamanı ve hareketin yönünü kavrar
+        h1 = LSTM(256)(reshaped_state)
         h1 = LayerNormalization()(h1)
-        h1 = LeakyReLU(alpha=0.1)(h1)
+        h1 = LeakyReLU(negative_slope=0.1)(h1)
         
-        # Katman 2 + Normalizasyon + LeakyReLU
-        h2 = Dense(512)(h1)
+        # 3. Karar Katmanı
+        h2 = Dense(128)(h1)
         h2 = LayerNormalization()(h2)
-        h2 = LeakyReLU(alpha=0.1)(h2)
+        h2 = LeakyReLU(negative_slope=0.1)(h2)
         
-        # Katman 3 + Normalizasyon + LeakyReLU
-        h3 = Dense(256)(h2)
-        h3 = LayerNormalization()(h3)
-        h3 = LeakyReLU(alpha=0.1)(h3)
-        
-        # Çıkış Katmanları - Kritik İnitialization (Ağırlık Başlatma)
-        # Çıkışların başta 0'a yakın (linear bölgede) olmasını garantiliyoruz
         last_init = RandomUniform(minval=-0.003, maxval=0.003)
-        
-        linear_vel = Dense(1, activation='sigmoid', kernel_initializer=last_init, name='linear')(h3) 
-        angular_vel = Dense(1, activation='tanh', kernel_initializer=last_init, name='angular')(h3)  
+        linear_vel = Dense(1, activation='sigmoid', kernel_initializer=last_init, name='linear')(h2) 
+        angular_vel = Dense(1, activation='tanh', kernel_initializer=last_init, name='angular')(h2)  
         
         output = Concatenate()([linear_vel, angular_vel])
         return Model(state_input, output)
@@ -245,26 +240,23 @@ class DDPGAgent(Node):
         state_input = Input(shape=(self.state_size,))
         action_input = Input(shape=(self.action_size,))
         
-        # 1. Aşama: SADECE Çevreyi Anla (Feature Extraction)
-        # Ham 78 boyutlu Lidar verisini anlamlı özelliklere dönüştürüyoruz
-        s1 = Dense(512)(state_input)
+        # 1. Çevrenin zaman içindeki değişimini anla
+        reshaped_state = Reshape((self.stack_size, self.raw_state_size))(state_input)
+        s1 = LSTM(256)(reshaped_state)
         s1 = LayerNormalization()(s1)
-        s1 = LeakyReLU(alpha=0.1)(s1)
+        s1 = LeakyReLU(negative_slope=0.1)(s1)
         
-        # 2. Aşama: Aksiyonu Şimdi Dahil Et (Late Concatenation)
-        # Ağ çevreyi anladı, şimdi yapılan hamleyi değerlendirme vakti
+        # 2. Şoförün o anki hamlesiyle LSTM'in çıkardığı zaman algısını birleştir
         concat = Concatenate()([s1, action_input])
         
-        # 3. Aşama: Ortak Karar ve Puanlama Mekanizması (Q-Value)
-        h1 = Dense(512)(concat)
+        h1 = Dense(256)(concat)
         h1 = LayerNormalization()(h1)
-        h1 = LeakyReLU(alpha=0.1)(h1)
+        h1 = LeakyReLU(negative_slope=0.1)(h1)
         
-        h2 = Dense(256)(h1)
+        h2 = Dense(128)(h1)
         h2 = LayerNormalization()(h2)
-        h2 = LeakyReLU(alpha=0.1)(h2)
+        h2 = LeakyReLU(negative_slope=0.1)(h2)
         
-        # Critic ağı puan (Q-Değeri) verir, bu yüzden aktivasyon 'linear' kalır
         output = Dense(1, activation='linear')(h2) 
         
         return Model([state_input, action_input], output)
