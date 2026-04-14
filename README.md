@@ -87,17 +87,19 @@ Bash
 tensorboard --logdir ~/turtlebot3_ws/src/turtlebot3_machine_learning/turtlebot3_dqn/saved_model/logs_sac
 
 (Çalıştırdıktan sonra tarayıcınızda http://localhost:6006 adresine gidin).
+```
+
 🛠️ Geliştirici İpuçları
 
     Hızlı Derleme Kısayolu: Python (.py) dosyalarında yaptığınız değişikliklerin sistemi her seferinde yeniden derlemeden anında uygulanması için projeyi aşağıdaki bayrakla derleyin:
-    Bash
+```bash
 
     colcon build --packages-select turtlebot3_dqn --symlink-install
 
     Simülasyonu Hızlandırmak: Gazebo açıldığında sol panelden Physics menüsüne gidin ve real_time_update_rate değerini 0 yapın. (Not: Fizik hataları başlarsa bilgisayar hızınıza göre optimize edin).
 
     Model Kayıtları: Eğitilen modelin ağırlıkları (.keras formatında) her 10 bölümde bir otomatik olarak saved_model klasörüne kaydedilir.
-
+```
 ## 🚀 Gelecek Planları ve Hiperparametre Optimizasyonu
 
 Projenin bir sonraki fazında, ajanın şoförlük kabiliyetlerini ve ödül mekanizmasını stabilize etmek adına aşağıdaki ileri düzey tekniklerin entegrasyonu planlanmaktadır:
