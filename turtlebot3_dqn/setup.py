@@ -39,6 +39,7 @@ setup(
             'ddpg_lstm_agent = turtlebot3_dqn.ddpg_lstm_agent:main',
             'sac_lstm_agent = turtlebot3_dqn.sac_lstm_agent:main',
             'sac_lstm_teleop = turtlebot3_dqn.sac_lstm_teleop:main',
+            'test_agent = turtlebot3_dqn.test_agent:main',
             'dqn_environment = turtlebot3_dqn.dqn_environment:main',
             'dqn_gazebo = turtlebot3_dqn.dqn_gazebo:main',
             'dqn_test = turtlebot3_dqn.dqn_test:main',

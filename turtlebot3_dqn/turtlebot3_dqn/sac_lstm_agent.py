@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 #################################################################################
-# SAC + LSTM Otonom Ralli Pilotu (V2 - Saf SAC Mimarisi)
-# GÜNCELLEME: Dayatılan alpha_floor kaldırıldı. Entropi tamamen SAC'ye bırakıldı.
-# GÜNCELLEME 2: Çıkışlara RandomUniform eklendi (Başlangıç stabilitesi için).
+# SAC + LSTM Otonom Ralli Pilotu (Stage 3 İçin Tam Otonom Versiyon)
+# Orhan tarafindan modifiye edilmis ve optimize edilmistir.
 #################################################################################
 
 import collections
@@ -26,10 +25,10 @@ from tensorflow.keras.initializers import RandomUniform
 
 from turtlebot3_msgs.srv import Dqn
 
+# Olası çakışmaları önlemek için CPU kullanımı (GPU varsa burayı silebilirsin)
 tf.config.set_visible_devices([], 'GPU')
 
 class SACLSTMAgentNode(Node):
-
     def __init__(self, stage_num, max_training_episodes):
         super().__init__('sac_lstm_agent')
 
@@ -37,32 +36,32 @@ class SACLSTMAgentNode(Node):
         self.stage = int(stage_num)
         self.train_mode = True  
         
-        self.stack_size = 3         
-        self.raw_state_size = 26    
-        self.state_size = self.raw_state_size * self.stack_size 
+        # --- AŞAMA 2: ALGI VE HAFIZA GÜNCELLEMESİ ---
+        self.stack_size = 5         # Hafıza penceresini 5 kareye çıkardık (Hareket tahmini için)
+        self.raw_state_size = 74    # 72 Lidar Işını + 2 Hedef (Mesafe, Açı)
+        self.state_size = self.raw_state_size * self.stack_size # Toplam 370 boyut
         
         self.stacked_state = np.zeros((1, self.state_size), dtype=np.float32)
         self.is_stack_full = False
 
         self.max_training_episodes = int(max_training_episodes)
 
+        # --- AŞAMA 3: EĞİTİM HİPERPARAMETRELERİ ---
         self.gamma = 0.99
         self.tau = 0.005
-        self.actor_lr = 0.0003
-        self.critic_lr = 0.0003
-        self.alpha_lr = 0.0003
         self.batch_size = 64
         self.min_replay_memory_size = 1000 
         
-        # --- OTOMATİK ENTROPİ (Merak) AYARI ---
-        self.target_entropy = -np.prod((self.action_size,)).astype(np.float32)
-        # Başlangıçta log_alpha 0.0 (Yani Alpha = 1.0) olarak başlar. SAC bunu kendi düşürür!
-        self.log_alpha = tf.Variable(0.0, dtype=tf.float32)
-        self.alpha_optimizer = Adam(learning_rate=self.alpha_lr)
-
+        self.target_entropy = -float(self.action_size) # Entropi hedefi otomatik ayarlandı (-2.0)
+        # DUZELTME: log_alpha baslangic degeri 0.0 yerine 0.5 (alpha=1.65), kesfin hizli
+        # azalmasi onleniyor. Alpha_opt learning rate de dusuruldu.
+        self.log_alpha = tf.Variable(0.5, dtype=tf.float32)
+        
+        # Hafıza (Replay Buffer)
         self.step_counter = 0
         self.replay_memory = collections.deque(maxlen=100000)
 
+        # Ağların Kurulumu
         self.actor = self.build_actor()
         self.critic_1 = self.build_critic()
         self.critic_2 = self.build_critic()
@@ -72,39 +71,41 @@ class SACLSTMAgentNode(Node):
         self.target_critic_1.set_weights(self.critic_1.get_weights())
         self.target_critic_2.set_weights(self.critic_2.get_weights())
 
-        self.actor_optimizer = Adam(learning_rate=self.actor_lr)
-        self.critic_1_optimizer = Adam(learning_rate=self.critic_lr)
-        self.critic_2_optimizer = Adam(learning_rate=self.critic_lr)
+        self.actor_opt = Adam(learning_rate=0.0003)
+        self.critic_1_opt = Adam(learning_rate=0.0003)
+        self.critic_2_opt = Adam(learning_rate=0.0003)
+        # DUZELTME: alpha_opt lr 0.00003 -> 0.000005, entropi cok hizli dusuyordu
+        self.alpha_opt = Adam(learning_rate=0.00001)
 
+        # Loglama ve Kayıt Dizini
         self.load_episode = 0
         home_dir = os.path.expanduser('~')
-        self.model_dir_path = os.path.join(
-            home_dir, 
-            'turtlebot3_ws', 'src', 'turtlebot3_machine_learning', 'turtlebot3_dqn', 'saved_model'
-        )
+        self.model_dir_path = os.path.join(home_dir, 'turtlebot3_ws', 'src', 'turtlebot3_machine_learning', 'turtlebot3_dqn', 'saved_model')
         
         self.log_dir = os.path.join(self.model_dir_path, 'logs_sac', datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
         self.summary_writer = tf.summary.create_file_writer(self.log_dir)
 
+        # ROS 2 Servis İstemcileri
         self.rl_agent_interface_client = self.create_client(Dqn, 'rl_agent_interface')
         self.make_environment_client = self.create_client(Empty, 'make_environment')
         self.reset_environment_client = self.create_client(Dqn, 'reset_environment')
 
-        self.get_logger().info("Saf Otonom SAC + LSTM Mimarisi Baslatiliyor...")
+        self.get_logger().info(f"Otonom SAC+LSTM Baslatiliyor... Mod: Stage {self.stage} | Giris: {self.state_size}")
         self.process()
 
     def build_actor(self):
         state_input = Input(shape=(self.state_size,))
+        # State'i zaman serisine (5 adım, 74 özellik) çevirip LSTM'e veriyoruz
         reshaped_state = Reshape((self.stack_size, self.raw_state_size))(state_input)
         
-        x = LSTM(256, return_sequences=False)(reshaped_state)
+        x = LSTM(128, return_sequences=False)(reshaped_state)
         x = LayerNormalization()(x)
         x = LeakyReLU(negative_slope=0.1)(x)
+        
         x = Dense(128)(x)
         x = LayerNormalization()(x)
         x = LeakyReLU(negative_slope=0.1)(x)
         
-        # Ağırlıkların sıfıra yakın başlaması, ilk saniyelerde robotun çıldırmasını engeller.
         last_init = RandomUniform(minval=-0.003, maxval=0.003)
         mean = Dense(self.action_size, activation='linear', kernel_initializer=last_init)(x)
         log_std = Dense(self.action_size, activation='linear', kernel_initializer=last_init)(x)
@@ -114,8 +115,9 @@ class SACLSTMAgentNode(Node):
         state_input = Input(shape=(self.state_size,))
         action_input = Input(shape=(self.action_size,))
         
+        # State'i zaman serisine çevirip LSTM'e veriyoruz
         reshaped_state = Reshape((self.stack_size, self.raw_state_size))(state_input)
-        s = LSTM(256, return_sequences=False)(reshaped_state)
+        s = LSTM(128, return_sequences=False)(reshaped_state)
         s = LayerNormalization()(s)
         s = LeakyReLU(negative_slope=0.1)(s)
         
@@ -123,6 +125,7 @@ class SACLSTMAgentNode(Node):
         x = Dense(256)(x)
         x = LayerNormalization()(x)
         x = LeakyReLU(negative_slope=0.1)(x)
+        
         x = Dense(128)(x)
         x = LayerNormalization()(x)
         x = LeakyReLU(negative_slope=0.1)(x)
@@ -135,17 +138,12 @@ class SACLSTMAgentNode(Node):
         log_std = tf.clip_by_value(log_std, -20.0, 2.0)
         std = tf.exp(log_std)
         
-        if not self.train_mode:
-            action = tf.tanh(mean)
-        else:
-            noise = tf.random.normal(shape=mean.shape)
-            sampled_action = mean + std * noise
-            action = tf.tanh(sampled_action)
-            
-        action = action.numpy()[0]
-        linear_val = np.clip((action[0] + 1.0) / 2.0, 0.0, 1.0) 
-        angular_val = np.clip(action[1], -1.0, 1.0)
-        return [linear_val, angular_val]
+        noise = tf.random.normal(shape=mean.shape)
+        sampled_action = mean + std * noise
+        
+        # --- AŞAMA 1 UYUMU: Ajan daima [-1, 1] arası eylem üretir ---
+        action = tf.tanh(sampled_action).numpy()[0]
+        return [float(action[0]), float(action[1])]
 
     def sample_action_and_log_prob(self, state):
         mean, log_std = self.actor(state)
@@ -162,7 +160,6 @@ class SACLSTMAgentNode(Node):
 
     @tf.function
     def train_step(self, states, actions, rewards, next_states, dones):
-        # Alpha (Merak) tamamen özgür!
         alpha = tf.exp(self.log_alpha)
         
         next_actions, next_log_probs = self.sample_action_and_log_prob(next_states)
@@ -180,8 +177,8 @@ class SACLSTMAgentNode(Node):
 
         c1_grads = tape.gradient(critic_1_loss, self.critic_1.trainable_variables)
         c2_grads = tape.gradient(critic_2_loss, self.critic_2.trainable_variables)
-        self.critic_1_optimizer.apply_gradients(zip(c1_grads, self.critic_1.trainable_variables))
-        self.critic_2_optimizer.apply_gradients(zip(c2_grads, self.critic_2.trainable_variables))
+        self.critic_1_opt.apply_gradients(zip(c1_grads, self.critic_1.trainable_variables))
+        self.critic_2_opt.apply_gradients(zip(c2_grads, self.critic_2.trainable_variables))
         
         with tf.GradientTape() as tape:
             new_actions, log_probs = self.sample_action_and_log_prob(states)
@@ -191,15 +188,17 @@ class SACLSTMAgentNode(Node):
             actor_loss = tf.reduce_mean(alpha * log_probs - q_min_new)
 
         actor_grads = tape.gradient(actor_loss, self.actor.trainable_variables)
-        self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
+        self.actor_opt.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
         
         with tf.GradientTape() as tape:
             alpha_loss = -tf.reduce_mean(self.log_alpha * tf.stop_gradient(log_probs + self.target_entropy))
         
         alpha_grads = tape.gradient(alpha_loss, [self.log_alpha])
-        self.alpha_optimizer.apply_gradients(zip(alpha_grads, [self.log_alpha]))
+        self.alpha_opt.apply_gradients(zip(alpha_grads, [self.log_alpha]))
         
         self.update_target_networks()
+        
+        return critic_1_loss, critic_2_loss, actor_loss
 
     def update_target_networks(self):
         for target_weight, weight in zip(self.target_critic_1.variables, self.critic_1.variables):
@@ -209,39 +208,20 @@ class SACLSTMAgentNode(Node):
 
     def train_model(self):
         batch = random.sample(self.replay_memory, self.batch_size)
-        
         states = np.array([i[0][0] for i in batch], dtype=np.float32)
-        actions_raw = np.array([i[1] for i in batch], dtype=np.float32)
-        actions = np.zeros_like(actions_raw)
-        actions[:, 0] = (actions_raw[:, 0] * 2.0) - 1.0 
-        actions[:, 1] = actions_raw[:, 1]
-        
+        actions = np.array([i[1] for i in batch], dtype=np.float32) 
         rewards = np.array([i[2] for i in batch], dtype=np.float32).reshape(-1, 1)
         next_states = np.array([i[3][0] for i in batch], dtype=np.float32)
         dones = np.array([float(i[4]) for i in batch], dtype=np.float32).reshape(-1, 1)
 
-        # alpha_floor tensorünü tamamen kaldırdık!
-        self.train_step(tf.convert_to_tensor(states), 
-                        tf.convert_to_tensor(actions), 
-                        tf.convert_to_tensor(rewards), 
-                        tf.convert_to_tensor(next_states), 
-                        tf.convert_to_tensor(dones))
-
-    def get_stacked_state(self, new_state):
-        new_state = np.asarray(new_state, dtype=np.float32).reshape(self.raw_state_size)
-        if not self.is_stack_full:
-            for i in range(self.stack_size):
-                start_idx = i * self.raw_state_size
-                end_idx = start_idx + self.raw_state_size
-                self.stacked_state[0, start_idx:end_idx] = new_state
-            self.is_stack_full = True
-        else:
-            self.stacked_state[0, :-self.raw_state_size] = self.stacked_state[0, self.raw_state_size:]
-            self.stacked_state[0, -self.raw_state_size:] = new_state
-        return self.stacked_state
-
-    def append_sample(self, transition):
-        self.replay_memory.append(transition)
+        c1_loss, c2_loss, a_loss = self.train_step(tf.convert_to_tensor(states), 
+                                                   tf.convert_to_tensor(actions), 
+                                                   tf.convert_to_tensor(rewards), 
+                                                   tf.convert_to_tensor(next_states), 
+                                                   tf.convert_to_tensor(dones))
+        
+        self.current_critic_loss = (c1_loss + c2_loss) / 2.0
+        self.current_actor_loss = a_loss
 
     def env_make(self):
         while not self.make_environment_client.wait_for_service(timeout_sec=1.0):
@@ -258,21 +238,33 @@ class SACLSTMAgentNode(Node):
         
         if future.result() is not None:
             raw_state = future.result().state 
-            state = self.get_stacked_state(raw_state) 
+            new_state = np.asarray(raw_state, dtype=np.float32).reshape(self.raw_state_size)
+            for i in range(self.stack_size):
+                start_idx = i * self.raw_state_size
+                end_idx = start_idx + self.raw_state_size
+                self.stacked_state[0, start_idx:end_idx] = new_state
+            self.is_stack_full = True
+            state = self.stacked_state.copy()
         else:
             state = np.zeros((1, self.state_size))
         return state
 
     def step(self, action):
         req = Dqn.Request()
-        req.action = [float(action[0]), float(action[1])]
+        req.action = action
 
         future = self.rl_agent_interface_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
 
         if future.result() is not None:
             raw_next_state = future.result().state
-            next_state = self.get_stacked_state(raw_next_state) 
+            new_state = np.asarray(raw_next_state, dtype=np.float32).reshape(self.raw_state_size)
+            
+            # Kaydırma işlemi (Frame Stacking)
+            self.stacked_state[0, :-self.raw_state_size] = self.stacked_state[0, self.raw_state_size:]
+            self.stacked_state[0, -self.raw_state_size:] = new_state
+            
+            next_state = self.stacked_state.copy()
             reward = future.result().reward
             done = future.result().done
         else:
@@ -286,44 +278,46 @@ class SACLSTMAgentNode(Node):
         time.sleep(1.0)
 
         for episode in range(self.load_episode + 1, self.max_training_episodes + 1):
-            self.reset_environment_client.call_async(Dqn.Request())
-            time.sleep(1.0) 
-            
+            # DUZELTME: cift reset kaldirildi. Asagidaki reset_environment() zaten
+            # reset_environment_client cagrisi yapiyor. Iki kez cagirmak
+            # state senkronunu bozuyor ve 3-adimlik anlik carpismaya yol aciyordu.
             state = self.reset_environment()
             local_step = 0
             score = 0
-            final_reward = 0.0
 
             while True:
+                time.sleep(0.05)
+                
                 local_step += 1
                 self.step_counter += 1
 
                 action = self.get_action(state)
                 next_state, reward, done = self.step(action)
                 score += reward
-                final_reward = reward
 
-                self.append_sample((state, action, reward, next_state, done))
+                # Hafızaya ekleme
+                self.replay_memory.append((state, action, reward, next_state, done))
 
+                # Eğitim adımı
                 if self.train_mode and len(self.replay_memory) > self.min_replay_memory_size:
                     self.train_model()
 
                 state = next_state
 
                 if done:
-                    # Gerçek Alpha değerini numpy olarak al
                     current_alpha = np.exp(self.log_alpha.numpy())
+                    basari_mesaji = "HEDEFE ULASILDI!" if reward >= 50.0 else "Hata yapildi veya Sure Bitti."
                     
-                    if final_reward >= 100.0:
-                        basari_mesaji = "🚀 HEDEFE ULAŞILDI!"
-                    else:
-                        basari_mesaji = "❌ Hata yapıldı."
-
-                    print(f"Bölüm: {episode} | Skor: {score:.2f} | Adım: {local_step} | Aktif Alpha: {current_alpha:.4f} -> {basari_mesaji}")
+                    print(f"Bölüm: {episode} | Skor: {score:.2f} | Adım: {local_step} | Aktif Entropi: {current_alpha:.4f} -> {basari_mesaji}")
                     
                     with self.summary_writer.as_default():
                         tf.summary.scalar('Episode Score', score, step=episode)
                         tf.summary.scalar('Aktif Alpha (Entropi)', current_alpha, step=episode)
+                        
+                        if hasattr(self, 'current_actor_loss'):
+                            tf.summary.scalar('Actor Loss', self.current_actor_loss, step=episode)
+                            tf.summary.scalar('Critic Loss', self.current_critic_loss, step=episode)
+                            
                     self.summary_writer.flush()
                     
                     if episode % 10 == 0:
@@ -341,10 +335,14 @@ def main(args=None):
     
     rclpy.init(args=args)
     sac_agent = SACLSTMAgentNode(stage_num, max_training_episodes)
-    rclpy.spin(sac_agent)
-
-    sac_agent.destroy_node()
-    rclpy.shutdown()
+    
+    try:
+        rclpy.spin(sac_agent)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sac_agent.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

@@ -54,6 +54,9 @@ class RLEnvironment(Node):
         self.last_angular_action = 0.0  
         self.stop_cmd_vel_timer = None
         self.angular_vel = [1.5, 0.75, 0.0, -0.75, -1.5]
+        
+        # YENİ: Dinamik engel takip değişkeni
+        self.prev_min_obstacle_dist = 3.5
 
         qos = QoSProfile(depth=10)
 
@@ -63,82 +66,57 @@ class RLEnvironment(Node):
             self.cmd_vel_pub = self.create_publisher(TwistStamped, 'cmd_vel', qos)
 
         self.odom_sub = self.create_subscription(
-            Odometry,
-            'odom',
-            self.odom_sub_callback,
-            qos
+            Odometry, 'odom', self.odom_sub_callback, qos
         )
         self.scan_sub = self.create_subscription(
-            LaserScan,
-            'scan',
-            self.scan_sub_callback,
-            qos_profile_sensor_data
+            LaserScan, 'scan', self.scan_sub_callback, qos_profile_sensor_data
         )
 
         self.clients_callback_group = MutuallyExclusiveCallbackGroup()
         self.task_succeed_client = self.create_client(
-            Goal,
-            'task_succeed',
-            callback_group=self.clients_callback_group
+            Goal, 'task_succeed', callback_group=self.clients_callback_group
         )
         self.task_failed_client = self.create_client(
-            Goal,
-            'task_failed',
-            callback_group=self.clients_callback_group
+            Goal, 'task_failed', callback_group=self.clients_callback_group
         )
         self.initialize_environment_client = self.create_client(
-            Goal,
-            'initialize_env',
-            callback_group=self.clients_callback_group
+            Goal, 'initialize_env', callback_group=self.clients_callback_group
         )
 
         self.rl_agent_interface_service = self.create_service(
-            Dqn,
-            'rl_agent_interface',
-            self.rl_agent_interface_callback
+            Dqn, 'rl_agent_interface', self.rl_agent_interface_callback
         )
         self.make_environment_service = self.create_service(
-            Empty,
-            'make_environment',
-            self.make_environment_callback
+            Empty, 'make_environment', self.make_environment_callback
         )
         self.reset_environment_service = self.create_service(
-            Dqn,
-            'reset_environment',
-            self.reset_environment_callback
+            Dqn, 'reset_environment', self.reset_environment_callback
         )
 
     def make_environment_callback(self, request, response):
         self.get_logger().info('Make environment called')
         while not self.initialize_environment_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().warn(
-                'service for initialize the environment is not available, waiting ...'
-            )
+            self.get_logger().warn('service for initialize the environment is not available, waiting ...')
         future = self.initialize_environment_client.call_async(Goal.Request())
         rclpy.spin_until_future_complete(self, future)
         response_goal = future.result()
         if not response_goal.success:
             self.get_logger().error('initialize environment request failed')
         else:
-            self.goal_pose_x = response_goal.pose_x
-            self.goal_pose_y = response_goal.pose_y
-            self.get_logger().info(
-                'goal initialized at [%f, %f]' % (self.goal_pose_x, self.goal_pose_y)
-            )
-
+            self.get_logger().info('goal initialized at [%f, %f]' % (self.goal_pose_x, self.goal_pose_y))
         return response
 
     def reset_environment_callback(self, request, response):
         state = self.calculate_state()
-        self.init_goal_distance = state[0]
+        self.init_goal_distance = self.goal_distance
         self.prev_goal_distance = self.init_goal_distance
+        self.prev_min_obstacle_dist = min(self.scan_ranges) if self.scan_ranges else 3.5
+        
         response.state = state
-
         self.done = False
         self.fail = False
         self.succeed = False
-        self.local_step = 0  # HATA ÇÖZÜLDÜ: Adim sayaci sadece bölüm basinda sifirlanir!
-
+        self.local_step = 0  
         return response
 
     def call_task_succeed(self):
@@ -194,7 +172,7 @@ class RLEnvironment(Node):
             self.front_ranges.append(distance)
             self.front_angles.append(angle)
 
-        self.min_obstacle_distance = min(self.scan_ranges)
+        self.min_obstacle_distance = min(self.scan_ranges) if self.scan_ranges else 10.0
         self.front_min_obstacle_distance = min(self.front_ranges) if self.front_ranges else 10.0
 
     def odom_sub_callback(self, msg):
@@ -220,10 +198,17 @@ class RLEnvironment(Node):
 
     def calculate_state(self):
         state = []
-        state.append(float(self.goal_distance))
-        state.append(float(self.goal_angle))
+        
+        # YENİ: STATE NORMALİZASYONU
+        norm_goal_dist = min(self.goal_distance / 3.5, 1.0)
+        norm_goal_angle = self.goal_angle / math.pi
+        
+        state.append(float(norm_goal_dist))
+        state.append(float(norm_goal_angle))
+        
+        # Lidar donanımında 72 atım ayarladığımız için burası direkt 72 boyutlu olacak
         for var in self.front_ranges:
-            state.append(float(var))
+            state.append(float(min(var / 3.5, 1.0)))
         
         self.local_step += 1
 
@@ -260,41 +245,34 @@ class RLEnvironment(Node):
         return state
 
     def calculate_reward(self):
-        # 1. Yönelme Ödülü 
+        # 1. Yonelme Odulu - Aralik: [-1.0, +1.0]
         yaw_reward = 1.0 - (2.0 * abs(self.goal_angle) / math.pi)
-        
-        # 2. Mesafe Ödülü 
-        distance_reward = (self.prev_goal_distance - self.goal_distance) * 100.0
-        self.prev_goal_distance = self.goal_distance 
-        
-        # 3. Zaman Cezasi 
-        time_penalty = -2.0
-        
-        # 4. YENİ: Kademeli Engel Cezası (Suni Potansiyel Alanı)
-        obstacle_reward = 0.0
-        safe_dist = 0.50  # 50 cm'den itibaren radar ötmeye / acı hissetmeye başlar
-        
-        if self.min_obstacle_distance < safe_dist:
-            # Risk oranını hesapla (0.0 ile 1.0 arası bir değer)
-            risk = (safe_dist - self.min_obstacle_distance) / safe_dist
-            
-            # Cezanın karesini alıyoruz ki; uzaktayken çok yumuşak, yaklaşınca aniden sertleşsin.
-            obstacle_reward = -3.0 * (risk ** 2)
 
-        # Direksiyon Cezasi (steering_penalty) tamamen silindi!
-        
+        # 2. Mesafe Odulu - DUZELTME: carpan 25.0 -> 15.0
+        distance_reward = (self.prev_goal_distance - self.goal_distance) * 15.0
+        self.prev_goal_distance = self.goal_distance
+
+        # 3. Zaman Cezasi - DUZELTME: -0.7 -> -0.2
+        # Eski deger 800 adimda -560 yapiyordu, erken crash'i ozendiriyordu
+        time_penalty = -0.2
+
+        # 4. Engel Cezasi - DUZELTME: safe_dist 0.70 -> 0.50
+        obstacle_reward = 0.0
+        safe_dist = 0.50
+
+        if self.min_obstacle_distance < safe_dist:
+            risk = (safe_dist - self.min_obstacle_distance) / safe_dist
+            obstacle_reward = -5.0 * (risk ** 2)
+
         step_reward = yaw_reward + distance_reward + obstacle_reward + time_penalty
 
-        print('yaw: %.2f, dist: %.2f, obs: %.2f, time: -2.0' % (yaw_reward, distance_reward, obstacle_reward))
+        print(f"Yaw: {yaw_reward:+.2f} | Dist: {distance_reward:+.2f} | Obs: {obstacle_reward:+.2f} | Time: {time_penalty:+.2f} || Adim Skoru: {step_reward:+.2f}")
 
-        # --- FİNAL HÜKMÜ ---
+        # --- FINAL HUKMU --- DUZELTME: +-200 -> +-100 (olcek normalize)
         if self.succeed:
-            reward = 300.0  
+            reward = 100.0
         elif self.fail:
-            if self.local_step >= self.max_step:
-                reward = -150.0 # Zaman asimi cezasi 
-            else:
-                reward = -150.0 # Çarpma cezasi
+            reward = -100.0
         else:
             reward = step_reward
 
@@ -306,21 +284,18 @@ class RLEnvironment(Node):
         MAX_LIN_VEL = 0.26
         MAX_ANG_VEL = 1.82
 
-        # --- İLERİ İTİŞ KURALI İPTAL (Robot artık durup dönebilir) ---
-        MIN_LIN_VEL = 0.00 
-        
-        raw_linear = float(action_list[0])
-        linear_cmd = raw_linear * (MAX_LIN_VEL - MIN_LIN_VEL) + MIN_LIN_VEL
+        # Ajanın gönderdiği [-1, 1] aralığını matematiksel olarak [0, 1] aralığına çekiyoruz.
+        normalized_linear = (float(action_list[0]) + 1.0) / 2.0 
+        linear_cmd = normalized_linear * MAX_LIN_VEL
 
-        self.last_angular_action = float(action_list[1])
-        angular_cmd = self.last_angular_action * MAX_ANG_VEL
+        angular_cmd = float(action_list[1]) * MAX_ANG_VEL
 
         if ROS_DISTRO == 'humble':
             msg = Twist()
             msg.linear.x = linear_cmd
             msg.angular.z = angular_cmd
         else:
-            msg = TwistStamped()
+            msg = TwistStamped()  # DÜZELTME: msg tanımlanmadan kullanılıyordu
             msg.twist.linear.x = linear_cmd
             msg.twist.angular.z = angular_cmd
 

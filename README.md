@@ -57,49 +57,52 @@ Sistemi başlatmak için 4 ayrı terminal açın ve aşağıdaki komutları sır
 Robotun içinde eğitileceği fiziksel dünyayı (Aşama 3) başlatır.
 ```bash
 ros2 launch turtlebot3_gazebo turtlebot3_dqn_stage3.launch.py
-
-2. Hakem ve Kurallar (Environment)
+```
+###2. Hakem ve Kurallar (Environment)
 
 Robotun ödül ve cezalarını hesaplayan, engelleri ve hedefi belirleyen çevreyi başlatır.
 Bash
-
+```bash
 ros2 run turtlebot3_dqn dqn_environment
+```
 
-3. Yapay Zeka Beyni (SAC + LSTM Ajanı)
+###3. Yapay Zeka Beyni (SAC + LSTM Ajanı)
 
 Robotun kontrolünü sağlayan ve öğrenme matrislerini güncelleyen ana sinir ağını başlatır. (Sondaki '3' rakamı, 3. Aşama haritası içindir).
 Bash
-
+```bash
 ros2 run turtlebot3_dqn sac_lstm_agent 3
+```
 
-4. Hareketli Engellerin Kontrolü (Gazebo Node)
+###4. Hareketli Engellerin Kontrolü (Gazebo Node)
 
 Aşama 3'teki hareketli sütunlara hız komutları göndererek ortamı dinamik ve zorlu hale getirir. (Sondaki '3' rakamı, 3. Aşama haritası içindir).
 Bash
-
+```bash
 ros2 run turtlebot3_dqn dqn_gazebo 3
+```
 
-5. Telemetri ve Analiz (TensorBoard)
+###5. Telemetri ve Analiz (TensorBoard)
 
 Yapay zekanın eğitim durumunu, Alpha (Merak) sönümlenmesini ve toplam skor grafiklerini anlık olarak tarayıcıdan izlemek içindir.
-Bash
-
+```bash
 tensorboard --logdir ~/turtlebot3_ws/src/turtlebot3_machine_learning/turtlebot3_dqn/saved_model/logs_sac
+```
 
 (Çalıştırdıktan sonra tarayıcınızda http://localhost:6006 adresine gidin).
-```
 
-🛠️ Geliştirici İpuçları
+##🛠️ Geliştirici İpuçları
 
-    Hızlı Derleme Kısayolu: Python (.py) dosyalarında yaptığınız değişikliklerin sistemi her seferinde yeniden derlemeden anında uygulanması için projeyi aşağıdaki bayrakla derleyin:
+Hızlı Derleme Kısayolu: Python (.py) dosyalarında yaptığınız değişikliklerin sistemi her seferinde yeniden derlemeden anında uygulanması için projeyi aşağıdaki bayrakla derleyin:
 ```bash
 
-    colcon build --packages-select turtlebot3_dqn --symlink-install
-
-    Simülasyonu Hızlandırmak: Gazebo açıldığında sol panelden Physics menüsüne gidin ve real_time_update_rate değerini 0 yapın. (Not: Fizik hataları başlarsa bilgisayar hızınıza göre optimize edin).
-
-    Model Kayıtları: Eğitilen modelin ağırlıkları (.keras formatında) her 10 bölümde bir otomatik olarak saved_model klasörüne kaydedilir.
+colcon build --packages-select turtlebot3_dqn --symlink-install
 ```
+
+Simülasyonu Hızlandırmak: Gazebo açıldığında sol panelden Physics menüsüne gidin ve real_time_update_rate değerini 2000 yapın. (Not: Fizik hataları başlarsa bilgisayar hızınıza göre optimize edin).
+
+Model Kayıtları: Eğitilen modelin ağırlıkları (.keras formatında) her 10 bölümde bir otomatik olarak saved_model klasörüne kaydedilir.
+
 ## 🚀 Gelecek Planları ve Hiperparametre Optimizasyonu
 
 Projenin bir sonraki fazında, ajanın şoförlük kabiliyetlerini ve ödül mekanizmasını stabilize etmek adına aşağıdaki ileri düzey tekniklerin entegrasyonu planlanmaktadır:

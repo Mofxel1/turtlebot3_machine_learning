@@ -168,9 +168,10 @@ class GazeboInterface(Node):
 
         self.reset_simulation_client.call_async(reset_req)
 
-    def reset_burger(self):
+    def reset_waffle_pi(self):
+        # DUZELTME: Silme komutu yorum olarak birakilmisti, gercek kod eklendi
         service_name_delete = '/world/dqn/remove'
-        req_delete = 'name: "burger", type: 2'
+        req_delete = 'name: "waffle_pi", type: 2'
         cmd_delete = [
             'gz', 'service',
             '-s', service_name_delete,
@@ -181,16 +182,18 @@ class GazeboInterface(Node):
         ]
         try:
             subprocess.run(cmd_delete, check=True, stdout=subprocess.DEVNULL)
-            print('Delete Burger')
+            print('Delete waffle_pi')
         except subprocess.CalledProcessError:
             pass
-        time.sleep(0.2)
+
+        time.sleep(0.3)
+
         service_name_spawn = '/world/dqn/create'
         package_share = get_package_share_directory('turtlebot3_gazebo')
-        model_path = os.path.join(package_share, 'models', 'turtlebot3_burger', 'model.sdf')
+        model_path = os.path.join(package_share, 'models', 'turtlebot3_waffle_pi', 'model.sdf')
         req_spawn = (
             f'sdf_filename: "{model_path}", '
-            f'name: "burger", '
+            f'name: "waffle_pi", '
             f'pose: {{ position: {{ x: 0.0, y: 0.0, z: 0.0 }} }}'
         )
         cmd_spawn = [
@@ -203,7 +206,7 @@ class GazeboInterface(Node):
         ]
         try:
             subprocess.run(cmd_spawn, check=True, stdout=subprocess.DEVNULL)
-            print('Spawn Burger')
+            print('Spawn waffle_pi at origin')
         except subprocess.CalledProcessError:
             pass
 
@@ -224,7 +227,7 @@ class GazeboInterface(Node):
         if ROS_DISTRO == 'humble':
             self.reset_simulation()
         else:
-            self.reset_burger()
+            self.reset_waffle_pi()
         time.sleep(0.2)
         self.generate_goal_pose()
         time.sleep(0.2)
@@ -240,7 +243,7 @@ class GazeboInterface(Node):
         if ROS_DISTRO == 'humble':
             self.reset_simulation()
         else:
-            self.reset_burger()
+            self.reset_waffle_pi()
         time.sleep(0.2)
         self.spawn_entity()
         response.pose_x = self.entity_pose_x
